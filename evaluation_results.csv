@@ -5,4 +5,4 @@ Missing teeth,0.4699,0.5493,0.5065,39,44,32
 Presence of implants,0.4667,0.4667,0.4667,7,8,8
 Present teeth,0.8650,0.8233,0.8436,205,32,44
 Tooth with mesial inclination,0.4118,0.3256,0.3636,14,20,29
-GLOBAL (Logic+Intersection),0.6168,0.5955,0.6060,293,182,199
+GLOBAL,0.6168,0.5955,0.6060,293,182,199
