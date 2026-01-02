@@ -1,282 +1,250 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import json
-from pathlib import Path
-from collections import defaultdict, Counter
+import os
+import glob
 import csv
-import re
-import sys
+from collections import defaultdict
 
-# ================== CONFIG DO USUÁRIO ==================
-name_exp = "llm_guided_yoloSAM"
-PRED_DIR   = Path("/home/rodrigo/Documents/Mestrado/LLM_INFERENCE/input_llm/output_llm/input_llm_guided_yoloSAM_formatados")   # pasta com .json de predição
-GT_DIR     = Path("ground_truth")     # pasta com .json de ground truth
-OUTPUT_DIR = Path("saida_metricas")
-RECURSIVE  = True  # procurar recursivamente por *.json
-# =======================================================
+# -----------------------------------------------------------------------------
+# CONSTANTS AND CONFIGURATION
+# -----------------------------------------------------------------------------
 
-# --------- Rótulos canônicos suportados ---------
-CANON_LABELS = {
-    "Missing teeth",
+# 1. Definition of the 32 permanent teeth using FDI notation.
+# Format: Quadrant (1-4) + Position (1-8). E.g., "18", "46".
+FDI_TEETH = set()
+for quadrant in [1, 2, 3, 4]:
+    for position in range(1, 9):
+        FDI_TEETH.add(f"{quadrant}{position}")
+
+# 2. Target classes for evaluation.
+# Only findings belonging to these categories will be processed.
+TARGET_CLASSES = {
     "Present teeth",
-    "Type of dentition",          # ESCALAR (0 = permanent, 1 = mixed)
-    "Endodontic treatment",
-    "Crown lesions",
-    "Tooth with mesial inclination",
-    "Presence of implants",
-}
-
-# --------- Aliases (variações com/sem “:”, PT/EN, acentos) ---------
-def _mk_aliases(*variants):
-    out = {}
-    for v in variants:
-        k = v.lower().strip().rstrip(":")
-        k = re.sub(r"\s+", " ", k)
-        out[k] = variants[0]
-    return out
-
-LABEL_ALIASES = {}
-LABEL_ALIASES |= _mk_aliases("Missing teeth", "missing teeth", "dentes ausentes")
-LABEL_ALIASES |= _mk_aliases("Present teeth", "present teeth", "dentes presentes")
-LABEL_ALIASES |= _mk_aliases("Type of dentition", "type of dentition",
-                             "tipo de dentição", "tipo de denticao")
-LABEL_ALIASES |= _mk_aliases("Endodontic treatment", "endodontic treatment",
-                             "tratamento endodôntico", "tratamento endodontico")
-LABEL_ALIASES |= _mk_aliases("Crown lesions", "crown lesions",
-                             "lesões de coroa", "lesoes de coroa")
-LABEL_ALIASES |= _mk_aliases("Tooth with mesial inclination",
-                             "tooth with mesial inclination",
-                             "dente com inclinação mesial", "dente com inclinacao mesial")
-LABEL_ALIASES |= _mk_aliases("Presence of implants", "presence of implants",
-                             "presença de implantes", "presenca de implantes")
-
-# --------- Tipagem dos rótulos ---------
-LIST_LABELS = {
     "Missing teeth",
-    "Present teeth",
-    "Endodontic treatment",
-    "Crown lesions",
-    "Tooth with mesial inclination",
     "Presence of implants",
-}
-SCALAR_LABELS = {"Type of dentition"}
-
-# --------- Normalizações ---------
-# IMPORTANTE: 0 = permanent, 1 = mixed
-DENTITION_MAP = {
-    "0": 0, "1": 1,
-    "permanent": 0, "permanente": 0,
-    "mixed": 1, "mista": 1,
+    "Endodontic treatment",
+    "Tooth with mesial inclination",
+    "Crown lesions"
 }
 
-NUM_TOKEN_RE = re.compile(r"\d+")
+# -----------------------------------------------------------------------------
+# HELPER FUNCTIONS
+# -----------------------------------------------------------------------------
 
-def canon_label(raw_label: str) -> str:
-    """Normaliza rótulo: remove ':', compacta espaços e aplica aliases."""
-    lbl = raw_label.strip().rstrip(":")
-    low = re.sub(r"\s+", " ", lbl.lower())
-    return LABEL_ALIASES.get(low, lbl)
-
-def split_label_and_value(obj_str: str):
-    """Divide 'Label: values' em (label, values). Aceita sem ':'."""
-    if ":" in obj_str:
-        left, right = obj_str.split(":", 1)
-        return left.strip(), right.strip()
-    s = obj_str.strip()
-    return s, ""
-
-def parse_list_of_teeth(values_str: str) -> set[int]:
-    """Extrai números de dentes (inteiros), tolera vírgulas e espaços."""
-    nums = NUM_TOKEN_RE.findall(values_str.replace(",", " "))
-    return {int(n) for n in nums}
-
-def parse_scalar(label: str, values_str: str):
-    """Converte valores escalares para formato esperado."""
-    if label == "Type of dentition":
-        token = values_str.strip().lower().replace(",", " ")
-        token = re.sub(r"\s+", " ", token).strip()
-        if token in DENTITION_MAP:
-            return DENTITION_MAP[token]
-        m = NUM_TOKEN_RE.search(values_str)
-        if m:
-            v = int(m.group())
-            if v == 0: return 0
-            if v == 1: return 1
-            return v
-        return None
-    m = NUM_TOKEN_RE.search(values_str)
-    return int(m.group()) if m else None
-
-def parse_objects(objects_list):
+def parse_json_content(data):
     """
-    Retorna dict[label] = set[int] (listas) ou int/None (escalares).
-    Ignora rótulos fora da lista CANON_LABELS.
+    Normalizes the JSON content into a dictionary of sets, handling heterogeneous formats.
+    
+    This function processes the 'objects' key, which may appear as:
+    - A dictionary: {"Class": [item1, item2]}
+    - A list of strings: ["Class: item1, item2"]
+
+    Args:
+        data (dict): The raw JSON data loaded from a file.
+
+    Returns:
+        defaultdict(set): A dictionary mapping category names to sets of finding strings.
+                          Example: {'Missing teeth': {'18', '28'}, ...}
     """
-    data = {}
-    for item in objects_list:
-        s = str(item)
-        raw_label, values = split_label_and_value(s)
-        label = canon_label(raw_label)
-        if label not in CANON_LABELS:
+    parsed = defaultdict(set)
+    objects = data.get("objects", [])
+
+    # Case A: 'objects' is a Dictionary
+    if isinstance(objects, dict):
+        for category, items in objects.items():
+            if category in TARGET_CLASSES:
+                # Ensure 'items' is iterable even if it's a single value
+                if not isinstance(items, list):
+                    items = [items]
+                for item in items:
+                    parsed[category].add(str(item).strip())
+
+    # Case B: 'objects' is a List of Strings
+    elif isinstance(objects, list):
+        for obj_str in objects:
+            if ": " in obj_str:
+                category, values_str = obj_str.split(": ", 1)
+                if category in TARGET_CLASSES:
+                    values = [v.strip() for v in values_str.split(",")]
+                    for val in values:
+                        parsed[category].add(val)
+    
+    return parsed
+
+def extract_findings_with_logic(data):
+    """
+    Extracts findings and applies domain-specific logic rules.
+
+    Rule Applied:
+        Complementarity of Teeth: If the category 'Missing teeth' exists in the data,
+        'Present teeth' is mathematically derived as the set difference between 
+        all valid FDI teeth (32) and the missing teeth. This overwrites any explicit
+        'Present teeth' list to ensure consistency.
+
+    Args:
+        data (dict): The raw JSON data.
+
+    Returns:
+        set: A set of tuples (Category, Item) representing the final findings for evaluation.
+             Example: {('Missing teeth', '18'), ('Present teeth', '11'), ...}
+    """
+    # 1. Initial Parsing
+    parsed_data = parse_json_content(data)
+
+    # 2. Logic Application: Deduce Present Teeth from Missing Teeth
+    if "Missing teeth" in parsed_data:
+        missing_set = parsed_data["Missing teeth"]
+        
+        # Filter strictly valid FDI teeth to avoid artifacts (e.g., '0' or deciduous codes)
+        valid_missing = {t for t in missing_set if t in FDI_TEETH}
+        
+        # Calculate the complement set
+        present_set = FDI_TEETH - valid_missing
+        parsed_data["Present teeth"] = present_set
+
+    # 3. Flatten structure for evaluation
+    findings = set()
+    for category, items in parsed_data.items():
+        if category in TARGET_CLASSES:
+            for item in items:
+                findings.add((category, item))
+    
+    return findings
+
+def get_common_categories(set_a, set_b):
+    """
+    Identifies the intersection of categories present in two sets of findings.
+    
+    Args:
+        set_a (set): Set of tuples (Category, Item).
+        set_b (set): Set of tuples (Category, Item).
+
+    Returns:
+        set: A set of category names (strings) present in both inputs.
+    """
+    cats_a = {cat for cat, val in set_a}
+    cats_b = {cat for cat, val in set_b}
+    return cats_a.intersection(cats_b)
+
+# -----------------------------------------------------------------------------
+# MAIN EVALUATION FUNCTION
+# -----------------------------------------------------------------------------
+
+def calculate_metrics_logic_enhanced(output_dir, gt_dir, csv_filename="metrics_derived.csv"):
+    """
+    Calculates detection metrics (Precision, Recall, F1) comparing Output vs. Ground Truth.
+    
+    Features:
+    - Micro-average aggregation.
+    - Logic-based data augmentation (deducing present teeth).
+    - Intersection-based filtering (evaluates only categories present in both files).
+    - CSV export of results.
+
+    Args:
+        output_dir (str): Path to the folder containing model output JSON files.
+        gt_dir (str): Path to the folder containing ground truth JSON files.
+        csv_filename (str): Name of the CSV file to save results.
+    """
+    # Accumulators for metrics
+    class_stats = defaultdict(lambda: {'tp': 0, 'fp': 0, 'fn': 0})
+    global_tp = 0
+    global_fp = 0
+    global_fn = 0
+    files_processed = 0
+
+    output_files = glob.glob(os.path.join(output_dir, "*.json"))
+    
+    print(f"Processing {len(output_files)} files with Logic Derivation...")
+
+    for out_path in output_files:
+        filename = os.path.basename(out_path)
+        gt_path = os.path.join(gt_dir, filename)
+
+        if not os.path.exists(gt_path):
+            # Skip if no corresponding ground truth file exists
             continue
-        if label in SCALAR_LABELS:
-            data[label] = parse_scalar(label, values)
-        else:
-            data[label] = parse_list_of_teeth(values)
-    return data
 
-def load_jsons(dir_path: Path, recursive: bool):
-    """Lê JSONs e indexa por img_name (ou nome do arquivo)."""
-    pattern = "**/*.json" if recursive else "*.json"
-    idx = {}
-    for jf in dir_path.glob(pattern):
-        try:
-            with jf.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            img_key = data.get("img_name") or jf.stem
-            parsed = parse_objects(data.get("objects", []))
-            idx[img_key] = parsed
-        except Exception as e:
-            print(f"[AVISO] Falha ao ler {jf}: {e}", file=sys.stderr)
-    return idx
+        # Load JSON files
+        with open(out_path, 'r', encoding='utf-8') as f:
+            out_data = json.load(f)
+        with open(gt_path, 'r', encoding='utf-8') as f:
+            gt_data = json.load(f)
 
-def compare_sets(pred_set: set[int], gt_set: set[int]):
-    """Retorna métricas de conjunto + acurácia (Jaccard)."""
-    inter = pred_set & gt_set
-    union = pred_set | gt_set
-    tp_items = sorted(inter)
-    fp_items = sorted(pred_set - gt_set)
-    fn_items = sorted(gt_set - pred_set)
-    tp, fp, fn = len(tp_items), len(fp_items), len(fn_items)
-    prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1   = (2*prec*rec) / (prec + rec) if (prec + rec) > 0 else 0.0
-    # Acurácia de conjunto (Jaccard/IoU). Se as duas listas forem vazias, define 1.0
-    acc  = (len(inter) / len(union)) if len(union) > 0 else 1.0
-    return tp, fp, fn, prec, rec, f1, acc, tp_items, fp_items, fn_items, len(inter), len(union)
+        # 1. Extract findings with domain logic (Missing -> Present deduction)
+        out_set_raw = extract_findings_with_logic(out_data)
+        gt_set_raw = extract_findings_with_logic(gt_data)
 
-def main():
-    if not PRED_DIR.is_dir():
-        print(f"Erro: PRED_DIR não encontrado: {PRED_DIR}", file=sys.stderr); sys.exit(1)
-    if not GT_DIR.is_dir():
-        print(f"Erro: GT_DIR não encontrado: {GT_DIR}", file=sys.stderr); sys.exit(1)
+        # 2. Filter by Category Intersection
+        # Ignore categories that appear in one file but not the other for the current image.
+        common_cats = get_common_categories(out_set_raw, gt_set_raw)
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_set = {(c, v) for c, v in out_set_raw if c in common_cats}
+        gt_set = {(c, v) for c, v in gt_set_raw if c in common_cats}
 
-    pred_index = load_jsons(PRED_DIR, RECURSIVE)
-    gt_index   = load_jsons(GT_DIR,   RECURSIVE)
+        # 3. Calculate True Positives, False Positives, False Negatives
+        tp_set = out_set.intersection(gt_set)
+        fp_set = out_set.difference(gt_set)
+        fn_set = gt_set.difference(out_set)
 
-    imgs = sorted(set(pred_index) & set(gt_index))
-    if not imgs:
-        print("[AVISO] Nenhuma imagem em comum por 'img_name'.", file=sys.stderr)
+        # 4. Update Global Accumulators
+        global_tp += len(tp_set)
+        global_fp += len(fp_set)
+        global_fn += len(fn_set)
 
-    per_image_rows = []
-    # Para listas: acumulamos TP/FP/FN + soma_inter e soma_uniao para Accuracy micro (Jaccard micro)
-    # Para escalar: TP = acertos; GT_SUPPORT = total avaliados (para Accuracy)
-    label_counters = defaultdict(lambda: Counter(TP=0, FP=0, FN=0, GT_SUPPORT=0, INTER=0, UNION=0))
-    diffs_lines = []
+        # 5. Update Per-Class Accumulators
+        for (cat, val) in tp_set: class_stats[cat]['tp'] += 1
+        for (cat, val) in fp_set: class_stats[cat]['fp'] += 1
+        for (cat, val) in fn_set: class_stats[cat]['fn'] += 1
 
-    for img in imgs:
-        p = pred_index.get(img, {})
-        g = gt_index.get(img, {})
+        files_processed += 1
 
-        for label in CANON_LABELS:
-            pred_val = p.get(label, None)
-            gt_val   = g.get(label, None)
-
-            if label in SCALAR_LABELS:
-                acc = 1.0 if (pred_val is not None and gt_val is not None and pred_val == gt_val) else 0.0
-                per_image_rows.append({
-                    "img_name": img, "label": label, "type": "scalar",
-                    "tp": "", "fp": "", "fn": "",
-                    "precision": "", "recall": "", "f1": "",
-                    "accuracy": acc,
-                    "scalar_pred": pred_val, "scalar_gt": gt_val
-                })
-                if gt_val is not None:
-                    label_counters[label]["GT_SUPPORT"] += 1
-                    if acc == 1.0:
-                        label_counters[label]["TP"] += 1
-            else:
-                pred_set = set(pred_val) if isinstance(pred_val, (set, list)) else set()
-                gt_set   = set(gt_val) if isinstance(gt_val, (set, list)) else set()
-                tp, fp, fn, prec, rec, f1, acc, tp_items, fp_items, fn_items, inter_n, union_n = compare_sets(pred_set, gt_set)
-
-                per_image_rows.append({
-                    "img_name": img, "label": label, "type": "list",
-                    "tp": tp, "fp": fp, "fn": fn,
-                    "precision": round(prec, 6), "recall": round(rec, 6), "f1": round(f1, 6),
-                    "accuracy": round(acc, 6),
-                    "scalar_pred": "", "scalar_gt": ""
-                })
-
-                label_counters[label]["TP"] += tp
-                label_counters[label]["FP"] += fp
-                label_counters[label]["FN"] += fn
-                label_counters[label]["GT_SUPPORT"] += len(gt_set)
-                label_counters[label]["INTER"] += inter_n
-                label_counters[label]["UNION"] += union_n
-
-                if fp_items or fn_items:
-                    diffs_lines.append(f"{img} | {label} | FP={fp_items} | FN={fn_items}")
-
-    # --- per_image_label_metrics.csv ---
-    per_image_csv = OUTPUT_DIR / f"per_image_label_metrics_{name_exp}.csv"
-    with per_image_csv.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "img_name","label","type","tp","fp","fn","precision","recall","f1","accuracy",
-            "scalar_pred","scalar_gt"
-        ])
+    # -------------------------------------------------------------------------
+    # EXPORT RESULTS TO CSV
+    # -------------------------------------------------------------------------
+    
+    with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ['Class', 'Precision', 'Recall', 'F1-Score', 'TP', 'FP', 'FN']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(per_image_rows)
 
-    # --- summary_by_label.csv ---
-    summary_csv = OUTPUT_DIR / f"summary_by_label_{name_exp}.csv"
-    with summary_csv.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "label","type","TP","FP","FN","Precision","Recall","F1","Accuracy","GT_SUPPORT","Extra"
-        ])
-        writer.writeheader()
-        for label in sorted(CANON_LABELS):
-            cnt = label_counters[label]
-            if label in SCALAR_LABELS:
-                total = cnt["GT_SUPPORT"]
-                acc   = (cnt["TP"]/total) if total > 0 else 0.0
-                writer.writerow({
-                    "label": label, "type": "scalar",
-                    "TP": cnt["TP"], "FP": "", "FN": "",
-                    "Precision": "", "Recall": "", "F1": "",
-                    "Accuracy": f"{acc:.6f}",
-                    "GT_SUPPORT": total, "Extra": "0=permanent, 1=mixed"
-                })
-            else:
-                TP, FP, FN = cnt["TP"], cnt["FP"], cnt["FN"]
-                prec = TP/(TP+FP) if (TP+FP)>0 else 0.0
-                rec  = TP/(TP+FN) if (TP+FN)>0 else 0.0
-                f1   = (2*prec*rec)/(prec+rec) if (prec+rec)>0 else 0.0
-                # Accuracy (micro Jaccard): soma_inter / soma_uniao (se união=0, define 1.0)
-                inter_sum, union_sum = cnt["INTER"], cnt["UNION"]
-                acc = (inter_sum/union_sum) if union_sum > 0 else 1.0
-                writer.writerow({
-                    "label": label, "type": "list",
-                    "TP": TP, "FP": FP, "FN": FN,
-                    "Precision": f"{prec:.6f}", "Recall": f"{rec:.6f}", "F1": f"{f1:.6f}",
-                    "Accuracy": f"{acc:.6f}",
-                    "GT_SUPPORT": cnt["GT_SUPPORT"], "Extra": ""
-                })
+        # Write Per-Class Metrics
+        for cls in sorted(list(TARGET_CLASSES)):
+            stats = class_stats[cls]
+            tp, fp, fn = stats['tp'], stats['fp'], stats['fn']
+            
+            denom_prec = tp + fp
+            denom_rec = tp + fn
+            
+            prec = tp / denom_prec if denom_prec > 0 else 0.0
+            rec = tp / denom_rec if denom_rec > 0 else 0.0
+            f1 = 2 * (prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
 
-    # --- diffs_examples.txt ---
-    diffs_txt = OUTPUT_DIR / "diffs_examples.txt"
-    with diffs_txt.open("w", encoding="utf-8") as f:
-        f.write("# Discrepâncias por imagem/label (FP=previstos a mais; FN=itens faltantes)\n")
-        for line in diffs_lines[:5000]:
-            f.write(line + "\n")
+            writer.writerow({
+                'Class': cls,
+                'Precision': f"{prec:.4f}",
+                'Recall': f"{rec:.4f}",
+                'F1-Score': f"{f1:.4f}",
+                'TP': tp, 'FP': fp, 'FN': fn
+            })
 
-    print(f"[OK] Imagens comparadas: {len(imgs)}")
-    print(f"[OK] Salvo: {per_image_csv}")
-    print(f"[OK] Salvo: {summary_csv}")
-    print(f"[OK] Salvo: {diffs_txt}")
+        # Write Global Metrics (Micro-Average)
+        g_prec = global_tp / (global_tp + global_fp) if (global_tp + global_fp) > 0 else 0.0
+        g_rec = global_tp / (global_tp + global_fn) if (global_tp + global_fn) > 0 else 0.0
+        g_f1 = 2 * (g_prec * g_rec) / (g_prec + g_rec) if (g_prec + g_rec) > 0 else 0.0
+
+        writer.writerow({
+            'Class': 'GLOBAL',
+            'Precision': f"{g_prec:.4f}",
+            'Recall': f"{g_rec:.4f}",
+            'F1-Score': f"{g_f1:.4f}",
+            'TP': global_tp, 'FP': global_fp, 'FN': global_fn
+        })
+
+    print(f"Processing complete. Processed {files_processed} images.")
+    print(f"Results saved to: {os.path.abspath(csv_filename)}")
+
 
 if __name__ == "__main__":
-    main()
+    output_folder = "/home/rodrigo/Documents/LLM_INFERENCE/input_llm/prompt/sasha/OUTPUT/complete_report/output_llm_guided"
+    gt_folder = "/home/rodrigo/Documents/LLM_INFERENCE/input_llm/prompt/sasha/Ground_truth"
+    
+    calculate_metrics_logic_enhanced(output_folder, gt_folder, "evaluation_results.csv")
