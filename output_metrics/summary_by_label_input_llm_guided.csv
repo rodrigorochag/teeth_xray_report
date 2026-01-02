@@ -1,8 +1,0 @@
-label,type,TP,FP,FN,Precision,Recall,F1,GT_SUPPORT,Extra
-Crown lesions,list,0,0,0,0.000000,0.000000,0.000000,0,
-Endodontic treatment,list,0,0,0,0.000000,0.000000,0.000000,0,
-Missing teeth,list,0,0,0,0.000000,0.000000,0.000000,0,
-Presence of implants,list,0,0,0,0.000000,0.000000,0.000000,0,
-Present teeth,list,0,0,0,0.000000,0.000000,0.000000,0,
-Tooth with mesial inclination,list,0,0,0,0.000000,0.000000,0.000000,0,
-Type of dentition,scalar,0,,,,,,0,"0=permanent, 1=mixed"
