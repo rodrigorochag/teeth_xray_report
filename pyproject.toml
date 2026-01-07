@@ -1,0 +1,27 @@
+[project]
+name = "finetuning"
+version = "0.1.0"
+description = "Finetuning and Prompting Teet X-Ray reports."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jupyterlab>=4.4.9",
+    "tensorboard==2.19.0",
+    "termcolor==3.1.0",
+    "torch==2.8.0",
+    "torchvision",
+    "transformers",
+    "accelerate",
+    "peft",
+    "bitsandbytes",
+    "datasets",
+    "openai",
+    "pillow",
+    "safetensors",
+    "huggingface-hub",
+    "sentencepiece",
+    "tqdm==4.67.1",
+    "ultralytics",
+    "ultralytics-thop>=2.0.18", # FLOPs computation https://github.com/ultralytics/thop
+    "wandb>=0.22.0",
+]

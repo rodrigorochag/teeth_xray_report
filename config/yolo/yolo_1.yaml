@@ -1,0 +1,5 @@
+weights: data/checkpoints/yolo/yolo12x.pt
+conf: 0.25
+iou: 0.70
+imgsz: 1024
+device: "cuda:0"
