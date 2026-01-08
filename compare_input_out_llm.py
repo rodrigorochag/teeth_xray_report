@@ -23,7 +23,8 @@ TARGET_CLASSES = {
     "Presence of implants",
     "Endodontic treatment",
     "Tooth with mesial inclination",
-    "Crown lesions"
+    "Crown lesions",
+    "Type of dentition"
 }
 
 # -----------------------------------------------------------------------------
