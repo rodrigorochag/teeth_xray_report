@@ -1,0 +1,4 @@
+model: gpt-5.2
+prompt_name: prompt_segment
+max_output_tokens: 256
+# same as "missing", just for segmentation

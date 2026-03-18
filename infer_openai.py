@@ -58,7 +58,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config-name", required = True)
     ap.add_argument("--imgs-path", default="data/imgs/raw", help="Input images folder")
-    ap.add_argument("--save-root", default="results", help="Output root folder")
+    ap.add_argument("--save-root", default="results/new", help="Output root folder")
     args = ap.parse_args()
 
     # Load OpenAI inference config
@@ -91,7 +91,7 @@ def main():
         to_save = {"pred": pred, "elapsed_ms": elapsed_ms}
         
         # Save per-image JSON result
-        out_path = out_dir / f"{img_path.stem}.json"
+        out_path = out_dir / f"{img_path.stem}.json".replace("_SAM1FT", "")
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(to_save, f, ensure_ascii=False, indent=2)
 

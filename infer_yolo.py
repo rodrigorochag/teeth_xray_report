@@ -75,7 +75,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config-name", required=True, help="YAML config name")
     ap.add_argument("--imgs-path", default="data/imgs/raw", help="Input images folder")
-    ap.add_argument("--save-root", default="results", help="Output root folder")
+    ap.add_argument("--save-root", default="results/new", help="Output root folder")
     args = ap.parse_args()
 
     config_path = Path("config/yolo") / args.config_name

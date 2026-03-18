@@ -1,0 +1,3 @@
+model: gpt-5.2
+prompt_name: prompt_complete
+max_output_tokens: 256

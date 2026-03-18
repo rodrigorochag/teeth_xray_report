@@ -2,6 +2,8 @@
 from typing import Any, Dict, List
 import json
 from pathlib import Path
+from random import random, uniform
+from PIL import ImageEnhance, ImageFilter, Image
 
 import torch
 from transformers import (
@@ -11,7 +13,7 @@ from transformers import (
     TrainingArguments,
 )
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
-from datasets import load_dataset
+from datasets import load_dataset, Features, Value, Sequence, Dataset, DatasetDict
 
 from . import prompts as P
 
@@ -42,6 +44,19 @@ def extract_json(text: str) -> dict:
     except Exception as e:
         return {"_error": str(e), "_raw": text}
 
+def augment_pano(img: Image.Image) -> Image.Image:
+    # Mild photometric jitter
+    if random() < 0.8:
+        img = ImageEnhance.Brightness(img).enhance(uniform(0.85, 1.15))
+    if random() < 0.8:
+        img = ImageEnhance.Contrast(img).enhance(uniform(0.85, 1.25))
+
+    # Very small blur sometimes (simulates acquisition noise)
+    if random() < 0.15:
+        img = img.filter(ImageFilter.GaussianBlur(radius=uniform(0.2, 0.8)))
+
+    return img
+
 
 def get_train_args(cfg: Dict, config_name: str):
     # One output folder per config (keeps runs isolated)
@@ -53,8 +68,10 @@ def get_train_args(cfg: Dict, config_name: str):
     gradient_accumulation_steps = cfg["training"]["gradient_accumulation_steps"]
     lr = float(cfg["training"]["learning_rate"])
     num_train_epochs = cfg["training"]["num_train_epochs"]
+    logging_steps = cfg["training"]["logging_steps"]
     eval_steps = cfg["training"]["eval_steps"]
     save_ckpt_steps = cfg["training"]["save_ckpt_steps"]
+    save_total_limit = cfg["training"]["save_total_limit"]
 
     return TrainingArguments(
         output_dir=output_dir,
@@ -65,7 +82,7 @@ def get_train_args(cfg: Dict, config_name: str):
         num_train_epochs=num_train_epochs,
         warmup_ratio=0.03,
         lr_scheduler_type="cosine",
-        logging_steps=10,
+        logging_steps=logging_steps,
         logging_strategy = "steps",
         
         # Evaluate and checkpoint periodically (needed for "best model" selection)
@@ -73,7 +90,7 @@ def get_train_args(cfg: Dict, config_name: str):
         eval_steps=eval_steps,
         save_strategy="steps", 
         save_steps=save_ckpt_steps,
-        save_total_limit=1,
+        save_total_limit=save_total_limit,
 
         # Keep the checkpoint with lowest eval_loss
         load_best_model_at_end=True,
@@ -91,6 +108,7 @@ def get_model(cfg: Dict):
     model_name = cfg["model_name"]
     r = cfg["training"]["lora_rank"]
     lora_alpha = cfg["training"]["lora_scale"] * r
+    lora_dropout = cfg["training"].get("lora_dropout", 0.05)
     embeddings_grad = cfg["training"]["embeddings_grad"]
 
     # QLoRA: load base in 4-bit, train only LoRA adapters
@@ -119,7 +137,7 @@ def get_model(cfg: Dict):
     lora = LoraConfig(
         r=r,
         lora_alpha=lora_alpha,
-        lora_dropout=0.05,
+        lora_dropout=lora_dropout,
         bias="none",
         task_type="CAUSAL_LM",
         target_modules="all-linear",
@@ -143,9 +161,27 @@ def load_teeth_dataset(cfg):
     path_val = cfg["val_jsonl"]
     classes = cfg["classes"]
 
+    TARGET_KEYS = [
+        "Teeth with mesial inclination",
+        "Missing teeth",
+        "Present teeth",
+        "Crown inclination",
+        "Type of dentition",
+        "Endodontic treatment",
+    ]
+    
+    features = Features({
+        "image": Value("string"),
+        "target": {
+            **{k: Sequence(Value("string")) for k in TARGET_KEYS if k != "Type of dentition"},
+            "Type of dentition": Value("string"),
+        },
+    })
+
     ds = load_dataset(
         "json",
         data_files={"train": path_train, "validation": path_val},
+        features=features,
     )
 
     # Keep only required keys in target (allows changing "classes" via config)
@@ -154,7 +190,14 @@ def load_teeth_dataset(cfg):
         target = {k: t.get(k, []) for k in classes}
         return {"image": example["image"], "target": target}
 
-    return ds.map(keep_required, remove_columns=ds["train"].column_names)
+    ds_train = list(map(keep_required, ds["train"]))
+    ds_valid = list(map(keep_required, ds["validation"]))
+    ds = DatasetDict({
+        "train": Dataset.from_list(ds_train),
+        "validation": Dataset.from_list(ds_valid),
+    })
+
+    return ds
 
 
 # INFERENCE
@@ -171,12 +214,15 @@ def get_ckpt_path(ckpt_root: Path):
     return max(ckpt_dirs, key=lambda p: int(p.name.split("-")[-1]))
     
 
-def get_qwen_infer_model(cfg: Dict[str, Any], cfg_name: str):
+def get_qwen_infer_model(cfg: Dict[str, Any], cfg_name: str, ckpt_name: str | None = None):
     """Load base Qwen (4-bit) + attach latest LoRA checkpoint for inference."""
     model_name = cfg["model_name"]
     
     config_stem = Path(cfg_name).stem
-    ckpt_path = get_ckpt_path(Path(cfg["output_dir"]) / config_stem) 
+    if ckpt_name is None:
+        ckpt_path = get_ckpt_path(Path(cfg["output_dir"]) / config_stem)
+    else:
+        ckpt_path = Path(cfg["output_dir"]) / config_stem / ckpt_name
 
     # Must match training quantization settings
     bnb = BitsAndBytesConfig(

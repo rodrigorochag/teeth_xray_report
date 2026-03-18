@@ -7,6 +7,7 @@ from pathlib import Path
 
 from teeth.evals import evaluate_predictions
 
+_IGNORE_IMGS_ = {"roccampinas.radiomemory.com.br_71966_6027"}
 
 def main():
     ap = argparse.ArgumentParser()
@@ -20,26 +21,28 @@ def main():
     ap.add_argument(
         "--classes",
         nargs="+",
-        default=["Missing teeth", "Present teeth"]
+        # default=["Missing teeth", "Present teeth"]
+        default = ["Missing teeth", "Endodontic treatment", "Crown lesions", "Mesial inclination", "Implant"]
     )
     args = ap.parse_args()
 
     gt_dir = Path(args.gt_dir)
 
-    for pred_dir in args.pred_dirs:
-        pred_dir = Path(pred_dir)
+    for root in args.pred_dirs:
+        root = Path(root)
+        for pred_dir in {p.parent for p in root.rglob("*.json")}:
+            results = evaluate_predictions(
+                gt_path=gt_dir,
+                pred_path=pred_dir,
+                classes=args.classes,
+                ignore_imgs = _IGNORE_IMGS_,
+            )
 
-        results = evaluate_predictions(
-            gt_path=gt_dir,
-            pred_path=pred_dir,
-            classes=args.classes,
-        )
-
-        out_path = pred_dir / "stats.json"
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
-        
-        print(f"[OK] {pred_dir} -> stats.json")
+            out_path = pred_dir / "stats.json"
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
+            
+            print(f"[OK] {pred_dir} -> stats.json")
 
 
 if __name__ == "__main__":

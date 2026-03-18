@@ -18,6 +18,7 @@ from teeth.utils import (
     get_train_args,
     get_model,
     load_teeth_dataset,
+    augment_pano
 )
 
 
@@ -36,6 +37,7 @@ class DataCollatorQwenVL:
     prompt_text: str
     img_res: Tuple[int, int]
     loss_masking: bool = True
+    do_augment: bool = False
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         texts, images, prompt_lens = [], [], []
@@ -43,6 +45,8 @@ class DataCollatorQwenVL:
         for ex in features:
             # Load and downscale panoramic X-ray (speed / memory win)
             img = Image.open(ex["image"]).convert("RGB")
+            if self.do_augment:
+                img = augment_pano(img)
             img.thumbnail(self.img_res, Image.Resampling.BILINEAR)
 
             # Canonical JSON target (sorted, strings, required keys only)
@@ -131,12 +135,14 @@ def main():
     processor = AutoProcessor.from_pretrained(cfg["model_name"], trust_remote_code=True, use_fast=False)
 
     # Custom collator: builds (prompt + image -> JSON) samples and optionally masks loss to JSON only
+    do_augment = cfg["training"].get("do_augment", False)
     collator = DataCollatorQwenVL(
         processor=processor,
         classes=classes,
         prompt_text=prompt_text,
         img_res=img_res,
         loss_masking=loss_masking,
+        do_augment = do_augment
     )
 
     # Create Trainer and run QLoRA fine-tuning

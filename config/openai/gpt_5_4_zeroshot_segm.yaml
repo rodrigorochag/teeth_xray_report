@@ -1,0 +1,3 @@
+model: gpt-5.4
+prompt_name: prompt_zero_shot_segm
+max_output_tokens: 256

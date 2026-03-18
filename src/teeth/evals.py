@@ -17,11 +17,20 @@ def prf(tp, fp, fn):
     recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     return precision, recall
 
+_CLASSES_MAP = {
+    "Mesial inclination": "Tooth with mesial inclination", 
+    "Implant": "Presence of implants"
+}
+
 def parse_json(json_path: Path, classes: List):
     try:
         elapsed = None
         with open(json_path, "r") as f:
             data = json.load(f)
+        if json_path.name in data:
+            data = data[json_path.name]
+        if json_path.stem in data:
+            data = data[json_path.stem]
         if "objects" in data:
             data = data["objects"]
         if "elapsed_ms" in data:
@@ -32,8 +41,17 @@ def parse_json(json_path: Path, classes: List):
         return {}, None
     
     if type(data) is dict:
+        if "Present" in data:
+            data["Present teeth"] = data["Present"]
+        if "Missing" in data:
+            data["Missing teeth"] = data["Missing"]
+        if "Absent" in data:
+            data["Missing teeth"] = data["Absent"]
+        if "Absent teeth" in data:
+            data["Missing teeth"] = data["Absent teeth"]
         results = {tcls:[str(n) for n in data.get(tcls, [])] for tcls in classes}
     elif type(data) is list:
+        # TODO: add parsing of partly names
         results = {}
         for line in data:
             for tcls in classes:
@@ -49,10 +67,17 @@ def parse_json(json_path: Path, classes: List):
         
     return results, elapsed
 
-def evaluate_predictions(gt_path: Path, pred_path: Path, classes: List):
+def evaluate_predictions(gt_path: Path, pred_path: Path, classes: List, ignore_imgs: Set):
     gt_files = set(os.listdir(gt_path))
     pred_files = set(os.listdir(pred_path))
     imgs_names = sorted(gt_files & pred_files)
+    imgs_names = [img_name for img_name in imgs_names if Path(img_name).stem not in ignore_imgs]
+
+    # add other names of classes
+    classes_ext = classes.copy()
+    for i in range(len(classes)):
+        if classes[i] in _CLASSES_MAP:
+            classes_ext.append(_CLASSES_MAP[classes[i]]) 
 
     print(f"We are going to evaluate results based on {len(imgs_names)} reports.") 
     
@@ -62,16 +87,20 @@ def evaluate_predictions(gt_path: Path, pred_path: Path, classes: List):
     # for img, gt_labels in gt.items():
     times_ms = []
     for img_name in imgs_names:
-        gt_labels, _ = parse_json(gt_path / img_name, classes)
+        gt_labels, _ = parse_json(gt_path / img_name, classes_ext)
+        
         pred_labels, elapsed_ms = parse_json(pred_path / img_name, classes)
         if elapsed_ms:
             times_ms.append(elapsed_ms)
 
         # accumulate TP, FP, FN
         for tcls in classes:
-            gt_set = _to_set(gt_labels.get(tcls, []))
+            gt_set = _to_set(gt_labels.get(tcls, [])) 
+            if gt_set == set() and tcls in _CLASSES_MAP:
+                gt_set = _to_set(gt_labels.get(_CLASSES_MAP[tcls], [])) 
+            
             pred_set = _to_set(pred_labels.get(tcls, []))
-
+        
             stats[tcls]["tp"] += len(gt_set & pred_set)
             stats[tcls]["fp"] += len(pred_set - gt_set)
             stats[tcls]["fn"] += len(gt_set - pred_set)

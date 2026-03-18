@@ -65,7 +65,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config-name", required=True, help="YAML config name")
     ap.add_argument("--imgs-path", default="data/imgs/raw", help="Input images folder")
-    ap.add_argument("--save-root", default="results", help="Output root folder")
+    ap.add_argument("--save-root", default="results/new", help="Output root folder")
     args = ap.parse_args()
 
     config_path = Path("config/local_vlm") / args.config_name
@@ -75,33 +75,37 @@ def main():
     classes = cfg["classes"]
     prompt_text =  get_prompt(cfg["prompt_name"], classes = classes)
     imgs_path = Path(args.imgs_path)
-    img_res = (int(cfg.get("img_res1", 1380)), int(cfg.get("img_res2", 1380)))
+    img_res = (int(cfg["training"].get("img_res1", 1380)), int(cfg["training"].get("img_res2", 1380)))
     max_new_tokens = int(cfg.get("max_new_tokens", 256))
 
-    # Create run-specific output directory (one folder per config)
-    out_dir = Path(args.save_root) / Path(args.config_name).stem
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Iterate over all checkpoints
+    config_stem = Path(args.config_name).stem
+    ckpt_names = [p.name for p in (Path(cfg["output_dir"]) / config_stem).iterdir() if p.is_dir() and p.name.startswith("checkpoint-")]
+    for ckpt_name in ckpt_names:
+        # Create run-specific output directory (one folder per config)
+        out_dir = Path(args.save_root) / Path(args.config_name).stem / ckpt_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Load base Qwen model + LoRA adapter for inference
+        processor, model = get_qwen_infer_model(cfg, args.config_name, ckpt_name)
 
-    # Load base Qwen model + LoRA adapter for inference
-    processor, model = get_qwen_infer_model(cfg, args.config_name)
+        exts = {".png", ".jpg", ".jpeg", ".webp"}
+        imgs = sorted([p for p in imgs_path.iterdir() if p.is_file() and p.suffix.lower() in exts])
 
-    exts = {".png", ".jpg", ".jpeg", ".webp"}
-    imgs = sorted([p for p in imgs_path.iterdir() if p.is_file() and p.suffix.lower() in exts])
+        for img_path in imgs:
+            pred, elapsed_ms = qwen_predict_one(
+                processor=processor,
+                model=model,
+                prompt_text=prompt_text,
+                img_path=img_path,
+                img_res=img_res,
+                max_new_tokens=max_new_tokens,
+            )
 
-    for img_path in imgs:
-        pred, elapsed_ms = qwen_predict_one(
-            processor=processor,
-            model=model,
-            prompt_text=prompt_text,
-            img_path=img_path,
-            img_res=img_res,
-            max_new_tokens=max_new_tokens,
-        )
-
-        out_path = out_dir / f"{img_path.stem}.json"
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump({"pred": pred, "elapsed_ms": elapsed_ms}, f, ensure_ascii=False, indent=2) # TODO: add elapsed time
-        print(f"[ok] {img_path.name} -> {out_dir}")
+            out_path = out_dir / f"{img_path.stem}.json"
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump({"pred": pred, "elapsed_ms": elapsed_ms}, f, ensure_ascii=False, indent=2)
+        print(f"[ok] {ckpt_name} -> {len(imgs)} images")
 
 if __name__ == "__main__":
     main()
